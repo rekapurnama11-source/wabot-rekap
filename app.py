@@ -26,11 +26,16 @@ app = Flask(__name__)
 # ── CONFIG ─────────────────────────────────────────────────────
 FONNTE_TOKEN = os.environ.get("FONNTE_TOKEN", "mveUY7JCxoLQavoTLBoD")
 
-CSV_URL = (
-    "https://docs.google.com/spreadsheets/d/e/"
-    "2PACX-1vTp35-kuD2tNQRGS2s1oFEGKgk9-XBA44RaVAnOdSzhF_JIMy6U-"
-    "kpOQV0XBa8u1a6H7n5o5Y1_UWDF/pub?output=csv"
-)
+# Google Sheets CSV URL (langsung)
+SHEET_ID = "2PACX-1vTp35-kuD2tNQRGS2s1oFEGKgk9-XBA44RaVAnOdSzhF_JIMy6U-kpOQV0XBa8u1a6H7n5o5Y1_UWDF"
+CSV_URL_DIRECT = f"https://docs.google.com/spreadsheets/d/e/{SHEET_ID}/pub?output=csv"
+
+# Proxy fallback list
+PROXY_URLS = [
+    f"https://api.allorigins.win/raw?url={requests.utils.quote(CSV_URL_DIRECT)}",
+    f"https://corsproxy.io/?{requests.utils.quote(CSV_URL_DIRECT)}",
+    f"https://proxy.cors.sh/{CSV_URL_DIRECT}",
+]
 
 TRIGGER_WORDS = ["rekap", "laporan", "resume", "data", "report"]
 
@@ -40,7 +45,6 @@ BIDANG_CONFIG = {
     "HARPRO": "🟠",
 }
 
-# Kondisi Akhir emoji mapping
 KONDISI_EMOJI = {
     "CLOSE":    "✅",
     "OPEN":     "🔴",
@@ -49,52 +53,73 @@ KONDISI_EMOJI = {
     "CANCEL":   "❌",
 }
 
-# ── AMBIL & PROSES DATA CSV ────────────────────────────────────
-def fetch_and_build(url):
-    resp = requests.get(url, timeout=20)
-    resp.raise_for_status()
-    df = pd.read_csv(StringIO(resp.text), header=0)
+# ── AMBIL CSV DENGAN FALLBACK ──────────────────────────────────
+def fetch_csv():
+    """Coba ambil CSV langsung dulu, kalau gagal pakai proxy."""
+    errors = []
 
-    # Nama kolom berdasarkan header asli
-    # Kolom: Kode, Sub Bidang, Level Anomali, Uraian, Hartrans,
-    #        UPT, ULTG, Gardu Induk, Nama Ruas/Bay, Nama Tower,
-    #        Kondisi Terkini, Kondisi Awal, TGL RENCANA, TGL REALISASI, Kondisi Akhir, ...
-    col_upt         = df.columns[5]   # F - UPT
-    col_sub_bidang  = df.columns[1]   # B - Sub Bidang
-    col_level       = df.columns[2]   # C - Level Anomali
-    col_uraian      = df.columns[3]   # D - Uraian
-    col_kondisi_akhir = df.columns[14] # O - Kondisi Akhir
+    # Coba langsung dulu
+    try:
+        resp = requests.get(CSV_URL_DIRECT, timeout=15,
+                            headers={"User-Agent": "Mozilla/5.0"})
+        if resp.status_code == 200 and "," in resp.text[:500]:
+            print("[CSV] Berhasil langsung")
+            return resp.text
+    except Exception as e:
+        errors.append(f"direct: {e}")
 
-    # Bersihkan data
-    df[col_upt]          = df[col_upt].astype(str).str.strip().str.upper()
-    df[col_sub_bidang]   = df[col_sub_bidang].astype(str).str.strip().str.upper()
-    df[col_level]        = df[col_level].astype(str).str.strip()
-    df[col_uraian]       = df[col_uraian].astype(str).str.strip()
-    df[col_kondisi_akhir]= df[col_kondisi_akhir].astype(str).str.strip().str.upper()
+    # Coba proxy satu per satu
+    for proxy_url in PROXY_URLS:
+        try:
+            resp = requests.get(proxy_url, timeout=20,
+                                headers={"User-Agent": "Mozilla/5.0"})
+            if resp.status_code == 200 and "," in resp.text[:500]:
+                print(f"[CSV] Berhasil via proxy: {proxy_url[:50]}")
+                return resp.text
+        except Exception as e:
+            errors.append(f"proxy: {e}")
 
-    # ── FILTER UPT KARAWANG ──
+    raise Exception("Semua metode gagal: " + " | ".join(errors))
+
+# ── PROSES DATA CSV ────────────────────────────────────────────
+def fetch_and_build():
+    csv_text = fetch_csv()
+    df = pd.read_csv(StringIO(csv_text), header=0)
+
+    col_upt           = df.columns[5]   # F - UPT
+    col_sub_bidang    = df.columns[1]   # B - Sub Bidang
+    col_level         = df.columns[2]   # C - Level Anomali
+    col_uraian        = df.columns[3]   # D - Uraian
+    col_kondisi_akhir = df.columns[14]  # O - Kondisi Akhir
+
+    df[col_upt]           = df[col_upt].astype(str).str.strip().str.upper()
+    df[col_sub_bidang]    = df[col_sub_bidang].astype(str).str.strip().str.upper()
+    df[col_level]         = df[col_level].astype(str).str.strip()
+    df[col_uraian]        = df[col_uraian].astype(str).str.strip()
+    df[col_kondisi_akhir] = df[col_kondisi_akhir].astype(str).str.strip().str.upper()
+
+    # Filter UPT KARAWANG
     df_karawang = df[df[col_upt].str.contains("KARAWANG", na=False)]
+    print(f"[DATA] Total baris UPT Karawang: {len(df_karawang)}")
 
-    # ── REKAP per Sub Bidang → Level Anomali → Uraian ──
+    # Rekap per Sub Bidang → Level → Uraian
     rekap = defaultdict(lambda: defaultdict(lambda: defaultdict(int)))
     for _, row in df_karawang.iterrows():
         bidang = row[col_sub_bidang]
         level  = row[col_level]
         uraian = row[col_uraian]
-        if bidang and bidang != "NAN":
+        if bidang not in ("NAN", ""):
             rekap[bidang][level][uraian] += 1
 
-    # ── REKAP Kondisi Akhir per Sub Bidang ──
+    # Rekap Kondisi Akhir per Sub Bidang
     kondisi_rekap = defaultdict(lambda: defaultdict(int))
     for _, row in df_karawang.iterrows():
         bidang  = row[col_sub_bidang]
         kondisi = row[col_kondisi_akhir]
-        if bidang and bidang != "NAN" and kondisi and kondisi != "NAN":
+        if bidang not in ("NAN", "") and kondisi not in ("NAN", ""):
             kondisi_rekap[bidang][kondisi] += 1
 
-    total_karawang = len(df_karawang)
-
-    return rekap, kondisi_rekap, total_karawang
+    return rekap, kondisi_rekap, len(df_karawang)
 
 # ── FORMAT PESAN WA ────────────────────────────────────────────
 def format_pesan(rekap, kondisi_rekap, total_karawang):
@@ -118,15 +143,14 @@ def format_pesan(rekap, kondisi_rekap, total_karawang):
             all_bidang.append(b)
 
     for bidang in all_bidang:
-        emoji  = BIDANG_CONFIG.get(bidang, "⚪")
-        data   = rekap.get(bidang, {})
-        total  = sum(c for d in data.values() for c in d.values())
+        emoji = BIDANG_CONFIG.get(bidang, "⚪")
+        data  = rekap.get(bidang, {})
+        total = sum(c for d in data.values() for c in d.values())
         totals[bidang] = total
 
         lines.append(f"{emoji} *{bidang}*")
         lines.append(f"Total : {total} pekerjaan")
 
-        # Rekap Level Anomali → Uraian
         if data:
             for level in sorted(data):
                 lines.append(f"📌 _{level}_")
@@ -135,11 +159,11 @@ def format_pesan(rekap, kondisi_rekap, total_karawang):
         else:
             lines.append("  _(tidak ada data)_")
 
-        # Rekap Kondisi Akhir
+        # Kondisi Akhir
         kondisi_bidang = kondisi_rekap.get(bidang, {})
         if kondisi_bidang:
-            lines.append(f"")
-            lines.append(f"  📋 *Kondisi Akhir:*")
+            lines.append("")
+            lines.append("  📋 *Kondisi Akhir:*")
             for kondisi in sorted(kondisi_bidang):
                 em = KONDISI_EMOJI.get(kondisi, "▪️")
                 lines.append(f"  {em} {kondisi} : {kondisi_bidang[kondisi]}")
@@ -159,11 +183,7 @@ def format_pesan(rekap, kondisi_rekap, total_karawang):
 def kirim_wa(nomor, pesan):
     url = "https://api.fonnte.com/send"
     headers = {"Authorization": FONNTE_TOKEN}
-    payload = {
-        "target": nomor,
-        "message": pesan,
-        "countryCode": "62",
-    }
+    payload = {"target": nomor, "message": pesan, "countryCode": "62"}
     resp = requests.post(url, headers=headers, data=payload, timeout=15)
     print(f"[FONNTE RESPONSE] {resp.status_code} - {resp.text}")
     return resp.json()
@@ -194,7 +214,7 @@ def webhook():
 
     if nomor and any(kw in pesan_masuk for kw in TRIGGER_WORDS):
         try:
-            rekap, kondisi_rekap, total = fetch_and_build(CSV_URL)
+            rekap, kondisi_rekap, total = fetch_and_build()
             balasan = format_pesan(rekap, kondisi_rekap, total)
         except Exception as e:
             balasan = f"❌ Gagal mengambil data:\n{str(e)}"
