@@ -42,22 +42,26 @@ BIDANG_CONFIG = {
     "HARPRO": "🟠",
 }
 
-# Emoji per nilai kondisi
+# Nilai kondisi yang diabaikan
+KONDISI_IGNORE = {"NE", "NB", "NEN", "NAN", ""}
+
 KONDISI_EMOJI = {
-    "1-VERY GOOD": "🟢",
-    "2-GOOD":      "🟩",
-    "3-FAIR":      "🟡",
-    "4-POOR":      "🟠",
-    "5-CRITICAL":  "🔴",
-    "NE":          "⬜",
+    "1": "🟢",
+    "2": "🟩",
+    "3": "🟡",
+    "4": "🟠",
+    "5": "🔴",
 }
 
 def get_kondisi_emoji(val):
-    val_up = val.upper().strip()
     for key, em in KONDISI_EMOJI.items():
-        if key in val_up:
+        if val.strip().startswith(key + "-") or val.strip() == key:
             return em
     return "▪️"
+
+def is_valid_kondisi(val):
+    """Abaikan NE, NB, NEN, kosong, dan nan."""
+    return val.strip().upper() not in KONDISI_IGNORE and val.strip() != ""
 
 # ── AMBIL CSV DENGAN FALLBACK ──────────────────────────────────
 def fetch_csv():
@@ -88,8 +92,6 @@ def fetch_and_build():
 
     col_upt           = df.columns[5]   # F  - UPT
     col_sub_bidang    = df.columns[1]   # B  - Sub Bidang
-    col_level         = df.columns[2]   # C  - Level Anomali
-    col_uraian        = df.columns[3]   # D  - Uraian
     col_prog_kerja    = df.columns[9]   # J  - Program Kerja
     col_kondisi_awal  = df.columns[11]  # L  - Kondisi Awal
     col_kondisi_akhir = df.columns[14]  # O  - Kondisi Akhir
@@ -97,8 +99,6 @@ def fetch_and_build():
 
     df[col_upt]           = df[col_upt].astype(str).str.strip().str.upper()
     df[col_sub_bidang]    = df[col_sub_bidang].astype(str).str.strip().str.upper()
-    df[col_level]         = df[col_level].astype(str).str.strip()
-    df[col_uraian]        = df[col_uraian].astype(str).str.strip()
     df[col_prog_kerja]    = df[col_prog_kerja].astype(str).str.strip()
     df[col_kondisi_awal]  = df[col_kondisi_awal].astype(str).str.strip()
     df[col_kondisi_akhir] = df[col_kondisi_akhir].astype(str).str.strip()
@@ -108,21 +108,12 @@ def fetch_and_build():
     df_k = df[df[col_upt].str.contains("KARAWANG", na=False)]
     print(f"[DATA] Total baris UPT Karawang: {len(df_k)}")
 
-    # ── REKAP per Sub Bidang → Level → Uraian ──
-    rekap = defaultdict(lambda: defaultdict(lambda: defaultdict(int)))
-    for _, row in df_k.iterrows():
-        bidang = row[col_sub_bidang]
-        level  = row[col_level]
-        uraian = row[col_uraian]
-        if bidang not in ("NAN", ""):
-            rekap[bidang][level][uraian] += 1
-
     # ── REKAP Kondisi Awal per Sub Bidang ──
     kondisi_awal_rekap = defaultdict(lambda: defaultdict(int))
     for _, row in df_k.iterrows():
         bidang = row[col_sub_bidang]
         val    = row[col_kondisi_awal]
-        if bidang not in ("NAN", "") and val not in ("NAN", ""):
+        if bidang not in ("NAN", "") and is_valid_kondisi(val):
             kondisi_awal_rekap[bidang][val] += 1
 
     # ── REKAP Kondisi Akhir per Sub Bidang ──
@@ -130,27 +121,25 @@ def fetch_and_build():
     for _, row in df_k.iterrows():
         bidang = row[col_sub_bidang]
         val    = row[col_kondisi_akhir]
-        if bidang not in ("NAN", "") and val not in ("NAN", ""):
+        if bidang not in ("NAN", "") and is_valid_kondisi(val):
             kondisi_akhir_rekap[bidang][val] += 1
 
     # ── REKAP Program Kerja + CLOSE/OPEN per Sub Bidang ──
     prog_rekap = defaultdict(lambda: defaultdict(lambda: defaultdict(int)))
     for _, row in df_k.iterrows():
-        bidang  = row[col_sub_bidang]
-        prog    = row[col_prog_kerja]
-        status  = row[col_status]
+        bidang = row[col_sub_bidang]
+        prog   = row[col_prog_kerja]
+        status = row[col_status]
         if bidang not in ("NAN", "") and prog not in ("NAN", ""):
             if "CLOSE" in status:
                 prog_rekap[bidang][prog]["CLOSE"] += 1
             elif "OPEN" in status:
                 prog_rekap[bidang][prog]["OPEN"] += 1
-            else:
-                prog_rekap[bidang][prog][status] += 1
 
-    return rekap, kondisi_awal_rekap, kondisi_akhir_rekap, prog_rekap, len(df_k)
+    return kondisi_awal_rekap, kondisi_akhir_rekap, prog_rekap, len(df_k)
 
 # ── FORMAT PESAN WA ────────────────────────────────────────────
-def format_pesan(rekap, kondisi_awal_rekap, kondisi_akhir_rekap, prog_rekap, total):
+def format_pesan(kondisi_awal_rekap, kondisi_akhir_rekap, prog_rekap, total):
     MONTHS = ["Januari","Februari","Maret","April","Mei","Juni",
               "Juli","Agustus","September","Oktober","November","Desember"]
     now = datetime.now()
@@ -166,29 +155,18 @@ def format_pesan(rekap, kondisi_awal_rekap, kondisi_akhir_rekap, prog_rekap, tot
 
     totals = {}
     all_bidang = list(BIDANG_CONFIG.keys())
-    for b in rekap:
-        if b not in all_bidang:
-            all_bidang.append(b)
 
     for bidang in all_bidang:
         emoji = BIDANG_CONFIG.get(bidang, "⚪")
-        data  = rekap.get(bidang, {})
-        total_bidang = sum(c for d in data.values() for c in d.values())
-        totals[bidang] = total_bidang
 
         total_close = sum(v.get("CLOSE", 0) for v in prog_rekap.get(bidang, {}).values())
         total_open  = sum(v.get("OPEN",  0) for v in prog_rekap.get(bidang, {}).values())
+        total_bidang = total_close + total_open
+        totals[bidang] = total_bidang
 
         lines.append(f"{emoji} *{bidang}*")
         lines.append(f"Total : {total_bidang:,} pekerjaan")
         lines.append(f"✅ Close : {total_close:,}  |  🔴 Open : {total_open:,}")
-
-        # Rekap Level Anomali → Uraian
-        if data:
-            for level in sorted(data):
-                lines.append(f"📌 _{level}_")
-                for uraian in sorted(data[level]):
-                    lines.append(f"  • {uraian} : {data[level][uraian]:,}")
 
         # ── Kondisi Awal ──
         ka_data = kondisi_awal_rekap.get(bidang, {})
@@ -267,8 +245,8 @@ def webhook():
 
     if nomor and any(kw in pesan_masuk for kw in TRIGGER_WORDS):
         try:
-            rekap, kond_awal, kond_akhir, prog_rekap, total = fetch_and_build()
-            balasan = format_pesan(rekap, kond_awal, kond_akhir, prog_rekap, total)
+            kond_awal, kond_akhir, prog_rekap, total = fetch_and_build()
+            balasan = format_pesan(kond_awal, kond_akhir, prog_rekap, total)
         except Exception as e:
             balasan = f"❌ Gagal mengambil data:\n{str(e)}"
             print(f"[CSV ERROR] {e}")
