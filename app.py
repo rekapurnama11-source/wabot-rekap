@@ -1,6 +1,6 @@
 """
 ===============================================================
-  BOT WHATSAPP REKAP PEKERJAAN
+  BOT WHATSAPP REKAP PEKERJAAN - UPT KARAWANG
   Platform : Fonnte (fonnte.com)
   Server   : Railway
 ===============================================================
@@ -40,58 +40,119 @@ BIDANG_CONFIG = {
     "HARPRO": "🟠",
 }
 
+# Kondisi Akhir emoji mapping
+KONDISI_EMOJI = {
+    "CLOSE":    "✅",
+    "OPEN":     "🔴",
+    "PROGRESS": "🔄",
+    "HOLD":     "⏸️",
+    "CANCEL":   "❌",
+}
+
 # ── AMBIL & PROSES DATA CSV ────────────────────────────────────
 def fetch_and_build(url):
     resp = requests.get(url, timeout=20)
     resp.raise_for_status()
     df = pd.read_csv(StringIO(resp.text), header=0)
-    df.columns = [f"COL_{chr(65+i)}" for i in range(len(df.columns))]
-    df = df.dropna(subset=["COL_B"])
-    df["COL_B"] = df["COL_B"].astype(str).str.strip().str.upper()
-    df["COL_C"] = df["COL_C"].astype(str).str.strip()
-    df["COL_D"] = df["COL_D"].astype(str).str.strip()
+
+    # Nama kolom berdasarkan header asli
+    # Kolom: Kode, Sub Bidang, Level Anomali, Uraian, Hartrans,
+    #        UPT, ULTG, Gardu Induk, Nama Ruas/Bay, Nama Tower,
+    #        Kondisi Terkini, Kondisi Awal, TGL RENCANA, TGL REALISASI, Kondisi Akhir, ...
+    col_upt         = df.columns[5]   # F - UPT
+    col_sub_bidang  = df.columns[1]   # B - Sub Bidang
+    col_level       = df.columns[2]   # C - Level Anomali
+    col_uraian      = df.columns[3]   # D - Uraian
+    col_kondisi_akhir = df.columns[14] # O - Kondisi Akhir
+
+    # Bersihkan data
+    df[col_upt]          = df[col_upt].astype(str).str.strip().str.upper()
+    df[col_sub_bidang]   = df[col_sub_bidang].astype(str).str.strip().str.upper()
+    df[col_level]        = df[col_level].astype(str).str.strip()
+    df[col_uraian]       = df[col_uraian].astype(str).str.strip()
+    df[col_kondisi_akhir]= df[col_kondisi_akhir].astype(str).str.strip().str.upper()
+
+    # ── FILTER UPT KARAWANG ──
+    df_karawang = df[df[col_upt].str.contains("KARAWANG", na=False)]
+
+    # ── REKAP per Sub Bidang → Level Anomali → Uraian ──
     rekap = defaultdict(lambda: defaultdict(lambda: defaultdict(int)))
-    for _, row in df.iterrows():
-        rekap[row["COL_B"]][row["COL_C"]][row["COL_D"]] += 1
-    return rekap
+    for _, row in df_karawang.iterrows():
+        bidang = row[col_sub_bidang]
+        level  = row[col_level]
+        uraian = row[col_uraian]
+        if bidang and bidang != "NAN":
+            rekap[bidang][level][uraian] += 1
+
+    # ── REKAP Kondisi Akhir per Sub Bidang ──
+    kondisi_rekap = defaultdict(lambda: defaultdict(int))
+    for _, row in df_karawang.iterrows():
+        bidang  = row[col_sub_bidang]
+        kondisi = row[col_kondisi_akhir]
+        if bidang and bidang != "NAN" and kondisi and kondisi != "NAN":
+            kondisi_rekap[bidang][kondisi] += 1
+
+    total_karawang = len(df_karawang)
+
+    return rekap, kondisi_rekap, total_karawang
 
 # ── FORMAT PESAN WA ────────────────────────────────────────────
-def format_pesan(rekap):
+def format_pesan(rekap, kondisi_rekap, total_karawang):
     MONTHS = ["Januari","Februari","Maret","April","Mei","Juni",
               "Juli","Agustus","September","Oktober","November","Desember"]
     now = datetime.now()
     tanggal = f"{now.day} {MONTHS[now.month-1]} {now.year}"
+
     lines = [
         "📊 *RESUME PEKERJAAN*",
-        f"Tanggal: {tanggal}",
+        f"📍 UPT KARAWANG",
+        f"🗓️ {tanggal}",
+        f"Total Data : *{total_karawang} pekerjaan*",
         "━━━━━━━━━━━━━━━",
     ]
+
     totals = {}
     all_bidang = list(BIDANG_CONFIG.keys())
     for b in rekap:
         if b not in all_bidang:
             all_bidang.append(b)
+
     for bidang in all_bidang:
-        emoji = BIDANG_CONFIG.get(bidang, "⚪")
-        data  = rekap.get(bidang, {})
-        total = sum(c for d in data.values() for c in d.values())
+        emoji  = BIDANG_CONFIG.get(bidang, "⚪")
+        data   = rekap.get(bidang, {})
+        total  = sum(c for d in data.values() for c in d.values())
         totals[bidang] = total
+
         lines.append(f"{emoji} *{bidang}*")
         lines.append(f"Total : {total} pekerjaan")
+
+        # Rekap Level Anomali → Uraian
         if data:
-            for kat_c in sorted(data):
-                lines.append(f"📌 _{kat_c}_")
-                for kat_d in sorted(data[kat_c]):
-                    lines.append(f"• {kat_d} : {data[kat_c][kat_d]}")
+            for level in sorted(data):
+                lines.append(f"📌 _{level}_")
+                for uraian in sorted(data[level]):
+                    lines.append(f"  • {uraian} : {data[level][uraian]}")
         else:
             lines.append("  _(tidak ada data)_")
+
+        # Rekap Kondisi Akhir
+        kondisi_bidang = kondisi_rekap.get(bidang, {})
+        if kondisi_bidang:
+            lines.append(f"")
+            lines.append(f"  📋 *Kondisi Akhir:*")
+            for kondisi in sorted(kondisi_bidang):
+                em = KONDISI_EMOJI.get(kondisi, "▪️")
+                lines.append(f"  {em} {kondisi} : {kondisi_bidang[kondisi]}")
+
         lines.append("━━━━━━━━━━━━━━━")
+
     grand = sum(totals.values())
     lines.append("📈 *TOTAL KESELURUHAN*")
     for bidang in all_bidang:
         emoji = BIDANG_CONFIG.get(bidang, "⚪")
         lines.append(f"{emoji} {bidang:<7}: {totals.get(bidang, 0)}")
     lines.append(f"🔢 Grand Total : *{grand}*")
+
     return "\n".join(lines)
 
 # ── KIRIM BALIK KE WA VIA FONNTE ──────────────────────────────
@@ -110,14 +171,12 @@ def kirim_wa(nomor, pesan):
 # ── WEBHOOK ENDPOINT ───────────────────────────────────────────
 @app.route("/webhook", methods=["POST", "GET"])
 def webhook():
-    # Fonnte bisa kirim form-data atau JSON
     try:
         if request.content_type and "application/json" in request.content_type:
             data = request.get_json(force=True) or {}
         else:
             data = request.form.to_dict()
             if not data:
-                # coba parse body manual
                 try:
                     data = json.loads(request.data.decode("utf-8"))
                 except:
@@ -128,15 +187,15 @@ def webhook():
 
     print(f"[WEBHOOK DATA] {data}")
 
-    nomor = data.get("sender", "") or data.get("from", "") or data.get("phone", "")
+    nomor       = data.get("sender", "") or data.get("from", "") or data.get("phone", "")
     pesan_masuk = str(data.get("message", "") or data.get("text", "") or data.get("body", "")).strip().lower()
 
     print(f"[IN] nomor={nomor} pesan={pesan_masuk}")
 
     if nomor and any(kw in pesan_masuk for kw in TRIGGER_WORDS):
         try:
-            rekap = fetch_and_build(CSV_URL)
-            balasan = format_pesan(rekap)
+            rekap, kondisi_rekap, total = fetch_and_build(CSV_URL)
+            balasan = format_pesan(rekap, kondisi_rekap, total)
         except Exception as e:
             balasan = f"❌ Gagal mengambil data:\n{str(e)}"
             print(f"[CSV ERROR] {e}")
@@ -149,7 +208,7 @@ def webhook():
 # ── HEALTH CHECK ───────────────────────────────────────────────
 @app.route("/", methods=["GET"])
 def index():
-    return "✅ Bot Rekap WA aktif!", 200
+    return "✅ Bot Rekap WA aktif! (UPT Karawang)", 200
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
